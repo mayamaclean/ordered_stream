@@ -1,0 +1,8 @@
+[package]
+name = "ordered_stream"
+version = "0.1.0"
+authors = ["maya"]
+
+[dependencies]
+crossbeam-channel = "0.3.6"
+intmap = "0.4.0"
