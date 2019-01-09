@@ -3,12 +3,139 @@ extern crate intmap;
 
 use crossbeam_channel::{RecvError, RecvTimeoutError, Receiver, TryRecvError};
 use intmap::IntMap;
+use std::ops::{Index, IndexMut, RangeTo, RangeFrom, RangeFull, RangeInclusive};
+use std::result::Result;
 use std::time::{Duration, Instant};
 
 static BENCH: bool = true;
 
+pub struct OffsetVec {
+    data: Vec<u8>,
+    offset: usize,
+}
+
+impl OffsetVec {
+    pub fn from_pieces(d: Vec<u8>, o: usize)
+        -> OffsetVec
+    {
+        OffsetVec {
+            data: d,
+            offset: o,
+        }
+    }
+
+    pub fn with_capacity(cap: usize)
+        -> OffsetVec
+    {
+        let tmp = Vec::with_capacity(cap);
+        OffsetVec {
+            data: tmp,
+            offset: 0,
+        }
+    }
+
+    pub fn new()
+        -> OffsetVec
+    {
+        OffsetVec::with_capacity(16)
+    }
+
+    pub fn len(&self)
+        -> usize
+    {
+        self.data.len() - self.offset
+    }
+
+    pub fn offset(&self)
+        -> usize
+    {
+        self.offset
+    }
+
+    pub fn inc_offset(&mut self, o: usize)
+        -> Result<(),()>
+    {
+        let new_offset = self.offset + o;
+        if new_offset >= self.data.len() {
+            return Err(());
+        }
+        self.offset = new_offset;
+        return Ok(());
+    }
+
+    pub fn into_inner(self)
+        -> Vec<u8>
+    {
+        self.data
+    }
+}
+
+impl Index<RangeFrom<usize>> for OffsetVec {
+    type Output = [u8];
+
+    #[inline]
+    fn index(&self, idx: RangeFrom<usize>) -> &[u8] {
+        &self.data[(idx.start + self.offset)..]
+    }
+}
+
+impl Index<RangeTo<usize>> for OffsetVec {
+    type Output = [u8];
+
+    #[inline]
+    fn index(&self, idx: RangeTo<usize>) -> &[u8] {
+        &self.data[self.offset..idx.end]
+    }
+}
+
+impl Index<RangeFull> for OffsetVec {
+    type Output = [u8];
+
+    #[inline]
+    fn index(&self, _: RangeFull) -> &[u8] {
+        &self.data[self.offset..]
+    }
+}
+
+impl Index<RangeInclusive<usize>> for OffsetVec {
+    type Output = [u8];
+
+    #[inline]
+    fn index(&self, idx: RangeInclusive<usize>) -> &[u8] {
+        &self.data[(self.offset + idx.start())..*idx.end()]
+    }
+}
+
+impl IndexMut<RangeFrom<usize>> for OffsetVec {
+    #[inline]
+    fn index_mut<'a>(&'a mut self, idx: RangeFrom<usize>) -> &'a mut [u8] {
+        self.data.index_mut((idx.start + self.offset)..)
+    }
+}
+
+impl IndexMut<RangeTo<usize>> for OffsetVec {
+    #[inline]
+    fn index_mut<'a>(&'a mut self, idx: RangeTo<usize>) -> &'a mut [u8] {
+        self.data.index_mut(self.offset..idx.end)
+    }
+}
+
+impl IndexMut<RangeFull> for OffsetVec {
+    #[inline]
+    fn index_mut<'a>(&'a mut self, _: RangeFull) -> &'a mut [u8] {
+        self.data.index_mut(self.offset..)
+    }
+}
+
+impl IndexMut<RangeInclusive<usize>> for OffsetVec {
+    #[inline]
+    fn index_mut<'a>(&'a mut self, idx: RangeInclusive<usize>) -> &'a mut [u8] {
+        self.data.index_mut((self.offset + idx.start())..*idx.end())
+    }
+}
+
 pub struct OrderedStream {
-    pub lookup:   IntMap<Vec<u8>>,
+    lookup:   IntMap<OffsetVec>,
     curr:     u64,
     incoming: Receiver<(u64, Vec<u8>)>,
 }
@@ -38,13 +165,25 @@ impl OrderedStream {
     pub fn add_item_sep(&mut self, seq: u64, item: Vec<u8>)
         -> bool
     {
-        self.lookup.insert(seq, item)
+        self.lookup.insert(seq, OffsetVec::from_pieces(item, 0))
     }
 
     pub fn add_item(&mut self, msg: (u64, Vec<u8>))
         -> bool
     {
         self.add_item_sep(msg.0, msg.1)
+    }
+
+    pub fn add_item_sep_offset(&mut self, seq: u64, item: Vec<u8>, offset: usize)
+        -> bool
+    {
+        self.lookup.insert(seq, OffsetVec::from_pieces(item, offset))
+    }
+
+    pub fn add_item_offset(&mut self, msg: (u64, Vec<u8>), offset: usize)
+        -> bool
+    {
+        self.lookup.insert(msg.0, OffsetVec::from_pieces(msg.1, offset))
     }
 
     pub fn chk_lookup(&mut self, seq: u64)
@@ -54,15 +193,21 @@ impl OrderedStream {
     }
 
     pub fn rm_item(&mut self, seq: u64)
-        -> Option<Vec<u8>>
+        -> Option<OffsetVec>
     {
         self.lookup.remove(seq)
+    }
+
+    pub fn get_item(&mut self, seq: u64)
+        -> Option<&mut OffsetVec>
+    {
+        self.lookup.get_mut(seq)
     }
 
     pub fn read_to_pos(&mut self, p: u64)
         -> Result<bool, RecvError>
     {
-        if p < self.curr
+        if p < self.pos()
         { return Ok(false); }
 
         if self.chk_lookup(p)
@@ -86,14 +231,14 @@ impl OrderedStream {
     pub fn read_to_seq_pos(&mut self)
         -> Result<bool, RecvError>
     {
-        let i = self.curr;
+        let i = self.pos();
         self.read_to_pos(i)
     }
 
     pub fn read_to_pos_timeout(&mut self, p: u64, d: Duration)
         -> Result<bool, RecvTimeoutError>
     {
-        if p < self.curr { return Ok(false); }
+        if p < self.pos() { return Ok(false); }
         if self.chk_lookup(p) { return Ok(false); }
 
         loop {
@@ -114,7 +259,7 @@ impl OrderedStream {
     pub fn read_to_seq_pos_timeout(&mut self, d: Duration)
         -> Result<bool, RecvTimeoutError>
     {
-        let i = self.curr;
+        let i = self.pos();
         self.read_to_pos_timeout(i, d)
     }
 
@@ -161,6 +306,17 @@ impl OrderedStream {
         (total, None)
     }
 
+    pub fn increment(&mut self)
+    {
+        self.curr += 1;
+    }
+
+    pub fn pos(&self)
+        -> u64
+    {
+        self.curr.clone()
+    }
+
     pub fn squeeze(&mut self, len: usize)
         -> (Option<Vec<u8>>, Option<RecvError>)
     {
@@ -173,37 +329,50 @@ impl OrderedStream {
             = len;
 
         let mut tempcur
-            = self.curr;
+            = self.pos();
+
+        let ptr: *mut OrderedStream = self as *mut _;
 
         match self
-             .rm_item(tempcur)
+             .get_item(tempcur)
         {
-            Some(mut data) => {
+            Some(data) => {
                 if data.len() == remainder {
-                    self.curr += 1;
+                    unsafe { (*ptr).increment() };
+                    if data.offset() == 0 {
+                        if BENCH {
+                            println!("{:#?}", timer.elapsed());
+                        }
+                        unsafe { return (Some((*ptr).rm_item(tempcur).unwrap().into_inner()), None) };
+                    }
+                    buf.extend_from_slice(&data[..]);
+                    unsafe { (*ptr).rm_item(tempcur) };
                     if BENCH {
                         println!("{:#?}", timer.elapsed());
                     }
-                    return (Some(data), None);
+                    return (Some(buf), None);
                 }
                 else if data.len() > remainder {
-                    let tmp = data.drain(0..remainder).collect();
-                    self.add_item_sep(tempcur, data);
+                    buf.extend_from_slice(&data[..(remainder + data.offset())]);
 
                     if BENCH {
                         println!("{:#?}", timer.elapsed());
                     }
 
-                    return (Some(tmp), None);
+                    data.inc_offset(remainder)
+                        .expect("error setting offset");
+
+                    return (Some(buf), None);
                 }
                 remainder -= data.len();
-                buf.append(&mut data);
+                buf.extend_from_slice(&data[..]);
+                unsafe { (*ptr).rm_item(tempcur) };
 
-                self.curr += 1;
+                unsafe { (*ptr).increment() };
                 tempcur += 1;
             },
             None => {
-                let e = self.read_to_seq_pos();
+                let e = unsafe { (*ptr).read_to_seq_pos() };
 
                 match e {
                     Ok(_) => (),
@@ -216,21 +385,20 @@ impl OrderedStream {
 
         loop {
             match self
-                 .rm_item(tempcur)
+                 .get_item(tempcur)
             {
-                Some(mut data) => {
+                Some(data) => {
                     if data.len() == remainder {
-                        self.curr += 1;
-
-                        buf.append(&mut data);
-
+                        unsafe { (*ptr).increment() };
+                        buf.extend_from_slice(&data[..]);
+                        unsafe { (*ptr).rm_item(tempcur) };
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
                         }
                         return (Some(buf), None);
                     }
                     else if data.len() > remainder {
-                        let reinsert: Vec<u8> = data.drain(remainder..).collect();
+                        /*let reinsert: Vec<u8> = data.drain(remainder..).collect();
 
                         buf.append(&mut data);
                         self.add_item_sep(tempcur, reinsert);
@@ -238,16 +406,26 @@ impl OrderedStream {
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
                         }
+                        return (Some(buf), None);*/
+                        buf.extend_from_slice(&data[..(data.offset() + remainder)]);
+                        data.inc_offset(remainder)
+                            .expect("error setting offset");
+
+                        if BENCH {
+                            println!("{:#?}", timer.elapsed());
+                        }
+
                         return (Some(buf), None);
                     }
-
                     remainder -= data.len();
-                    buf.append(&mut data);
-                    self.curr += 1;
+                    buf.extend_from_slice(&data[..]);
+                    unsafe { (*ptr).rm_item(tempcur) };
+
+                    unsafe { (*ptr).increment() };
                     tempcur += 1;
                 },
                 None => {
-                    let e = self.read_to_seq_pos();
+                    let e = unsafe { (*ptr).read_to_seq_pos() };
 
                     match e {
                         Ok(_) => (),
@@ -281,36 +459,50 @@ impl OrderedStream {
             = len;
 
         let mut tempcur
-            = self.curr;
+            = self.pos();
+
+        let ptr: *mut OrderedStream = self as *mut _;
 
         match self
-             .rm_item(tempcur)
+             .get_item(tempcur)
         {
-            Some(mut data) => {
+            Some(data) => {
                 if data.len() == remainder {
-                    self.curr += 1;
+                    unsafe { (*ptr).increment() };
+                    if data.offset() == 0 {
+                        if BENCH {
+                            println!("{:#?}", timer.elapsed());
+                        }
+                        unsafe { return (Some((*ptr).rm_item(tempcur).unwrap().into_inner()), None) };
+                    }
+                    buf.extend_from_slice(&data[..]);
+                    unsafe { (*ptr).rm_item(tempcur) };
                     if BENCH {
                         println!("{:#?}", timer.elapsed());
                     }
-                    return (Some(data), None);
+                    return (Some(buf), None);
                 }
                 else if data.len() > remainder {
-                    let tmp = data.drain(0..remainder).collect();
-
-                    self.add_item_sep(tempcur, data);
+                    buf.extend_from_slice(&data[..(remainder + data.offset())]);
 
                     if BENCH {
                         println!("{:#?}", timer.elapsed());
                     }
-                    return (Some(tmp), None);
+
+                    data.inc_offset(remainder)
+                        .expect("error setting offset");
+
+                    return (Some(buf), None);
                 }
                 remainder -= data.len();
-                buf.append(&mut data);
-                self.curr += 1;
+                buf.extend_from_slice(&data[..]);
+                unsafe { (*ptr).rm_item(tempcur) };
+
+                unsafe { (*ptr).increment() };
                 tempcur += 1;
             },
             None => {
-                let e = self.read_to_seq_pos_timeout(d);
+                let e = unsafe { (*ptr).read_to_seq_pos_timeout(d) };
 
                 match e {
                     Ok(_) => (),
@@ -326,20 +518,20 @@ impl OrderedStream {
 
         loop {
             match self
-                 .rm_item(tempcur)
+                 .get_item(tempcur)
             {
-                Some(mut data) => {
+                Some(data) => {
                     if data.len() == remainder {
-                        self.curr += 1;
-                        buf.append(&mut data);
-
+                        unsafe { (*ptr).increment() };
+                        buf.extend_from_slice(&data[..]);
+                        unsafe { (*ptr).rm_item(tempcur) };
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
                         }
                         return (Some(buf), None);
                     }
                     else if data.len() > remainder {
-                        let reinsert: Vec<u8> = data.drain(remainder..).collect();
+                        /*let reinsert: Vec<u8> = data.drain(remainder..).collect();
 
                         buf.append(&mut data);
                         self.add_item_sep(tempcur, reinsert);
@@ -347,15 +539,26 @@ impl OrderedStream {
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
                         }
+                        return (Some(buf), None);*/
+                        buf.extend_from_slice(&data[..(data.offset() + remainder)]);
+                        data.inc_offset(remainder)
+                            .expect("error setting offset");
+
+                        if BENCH {
+                            println!("{:#?}", timer.elapsed());
+                        }
+
                         return (Some(buf), None);
                     }
                     remainder -= data.len();
-                    buf.append(&mut data);
-                    self.curr += 1;
+                    buf.extend_from_slice(&data[..]);
+                    unsafe { (*ptr).rm_item(tempcur) };
+
+                    unsafe { (*ptr).increment() };
                     tempcur += 1;
                 },
                 None => {
-                    let e = self.read_to_seq_pos_timeout(d);
+                    let e = unsafe { (*ptr).read_to_seq_pos_timeout(d) };
 
                     match e {
                         Ok(_) => (),
@@ -381,29 +584,27 @@ impl OrderedStream {
         -> (Option<Vec<u8>>, Option<RecvError>)
     {
         let timer = Instant::now();
-        let i = self
-               .curr
-               .clone();
+        let i = self.pos();
 
         match self
              .rm_item(i)
         {
             Some(item) => {
-                self.curr += 1;
+                self.increment();
                 if BENCH {
                     println!("{:#?}", timer.elapsed());
                 }
-                return (Some(item), None);
+                return (Some(item.into_inner()), None);
             },
             None => {
                 match self.read_to_seq_pos() {
                     Ok(b) => {
-                        if b == true {
-                            self.curr += 1;
+                        if b {
+                            self.increment();
                             if BENCH {
                                 println!("{:#?}", timer.elapsed());
                             }
-                            return (self.rm_item(i), None);
+                            return (Some(self.rm_item(i).unwrap().into_inner()), None);
                         }
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
@@ -425,19 +626,17 @@ impl OrderedStream {
         -> (Option<Vec<u8>>, Option<RecvTimeoutError>)
     {
         let timer = Instant::now();
-        let i = self
-               .curr
-               .clone();
+        let i = self.pos();
 
         match self
              .rm_item(i)
         {
             Some(item) => {
-                self.curr += 1;
+                self.increment();
                 if BENCH {
                     println!("{:#?}", timer.elapsed());
                 }
-                return (Some(item), None);
+                return (Some(item.into_inner()), None);
             },
             None => {
                 match self
@@ -445,11 +644,12 @@ impl OrderedStream {
                 {
                     Ok(b) => {
                         if b == true {
-                            self.curr += 1;
+                            self.increment();
                             if BENCH {
                                 println!("{:#?}", timer.elapsed());
                             }
-                            return (self.rm_item(i), None);
+
+                            return (Some(self.rm_item(i).unwrap().into_inner()), None);
                         }
                         if BENCH {
                             println!("{:#?}", timer.elapsed());
@@ -465,12 +665,6 @@ impl OrderedStream {
                 }
             }
         }
-    }
-
-    pub fn position(&self)
-        -> u64
-    {
-        self.curr
     }
 
     pub fn sop(&mut self)
@@ -567,6 +761,7 @@ mod tests {
         lgmsg_smblock();
         smmsg_lgblock();
         msg_iter();
+        abc_blocks();
     }
 
     fn abc() {
@@ -613,12 +808,61 @@ mod tests {
         }
     }
 
+    fn abc_blocks() {
+        println!("alphablock test");
+        let (tx, rx) = unbounded();
+        let mut os = OrderedStream::with_capacity_and_recvr(64, rx);
+
+        let test = b"abcdefghijklmnopqrstuvwxyz";
+        let should_one = b"abcdefghijklmnopqrstuvwxyzabcdefghijklm";
+        let should_two = b"nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+        assert_eq!(should_one.len(), 39);
+        assert_eq!(should_two.len(), 39);
+        let mut msg = Vec::with_capacity(26);
+        msg.extend_from_slice(test);
+
+        for num in 0..3 {
+            match tx.send((num, msg.clone())) {
+                Ok(_) => (),
+                Err(e) => println!("err {:?}", num),
+            }
+        }
+        let mut one = Vec::with_capacity(39);
+        let mut two = Vec::with_capacity(39);
+        let mut cnt = 0;
+        loop {
+            let tmp = os.squeeze_timeout(39, Duration::from_millis(1));
+            match tmp.0 {
+                Some(x) => {
+                    println!("iter: {}, data: {} (len: {})", cnt, str::from_utf8(&x).expect("utf error"), x.len());
+                    if cnt == 0 {
+                        one.extend_from_slice(&x);
+                    } else if cnt == 1 {
+                        two.extend_from_slice(&x);
+                    }
+                },
+                None => {
+                    match tmp.1 {
+                        Some(e) => {
+                            println!("{:?}", e);
+                            break;
+                        },
+                        None => continue,
+                    }
+                },
+            }
+            cnt += 1;
+        }
+        assert_eq!(one[..], should_one[..]);
+        assert_eq!(two[..], should_two[..]);
+    }
+
     fn lgmsg_smblock() {
         println!("sending large messages and squeezing small blocks");
         let (tx, rx) = unbounded();
         let mut os = OrderedStream::with_capacity_and_recvr(4, rx);
 
-        let msg = vec![97u8; 8*1024*1024];
+        let msg = vec![97u8; 32*1024*1024];
 
         for i in 0u64..4 {
             match tx.send((i, msg.clone())) {
@@ -632,9 +876,15 @@ mod tests {
 
         loop {
             println!("lookup len: {}", os.lookup.len());
-            let tmp = os.squeeze_timeout(8*1024, Duration::from_millis(4));
+            let tmp = os.squeeze_timeout(7*1024*1024, Duration::from_millis(4));
             match tmp.0 {
-                Some(x) => println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..16]).expect("utf error")),
+                Some(x) => {
+                    let end = match x.len() >= 16 {
+                        true => 16,
+                        false => x.len(),
+                    };
+                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
+                },
                 None => {
                     match tmp.1 {
                         Some(e) => break,
@@ -649,11 +899,11 @@ mod tests {
     fn smmsg_lgblock() {
         println!("sending small messages and squeezing large blocks");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(8196, rx);
+        let mut os = OrderedStream::with_capacity_and_recvr(64*1024, rx);
 
         let msg = vec![97u8; 1350];
 
-        for i in 0u64..8196 {
+        for i in 0u64..64*1024 {
             match tx.send((i, msg.clone())) {
                 Ok(_) => (),
                 Err(e) => println!("{:?}", e),
@@ -665,9 +915,15 @@ mod tests {
 
         loop {
             println!("lookup len: {}", os.lookup.len());
-            let tmp = os.squeeze_timeout(8*1024*1024, Duration::from_millis(4));
+            let tmp = os.squeeze_timeout(32*1024*1024, Duration::from_millis(4));
             match tmp.0 {
-                Some(x) => println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..16]).expect("utf error")),
+                Some(x) => {
+                    let end = match x.len() >= 16 {
+                        true => 16,
+                        false => x.len(),
+                    };
+                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
+                },
                 None => {
                     match tmp.1 {
                         Some(e) => break,
@@ -700,7 +956,13 @@ mod tests {
             println!("lookup len: {}", os.lookup.len());
             let tmp = os.current_timeout(Duration::from_millis(1));
             match tmp.0 {
-                Some(x) => println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..16]).expect("utf error")),
+                Some(x) => {
+                    let end = match x.len() >= 16 {
+                        true => 16,
+                        false => x.len(),
+                    };
+                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
+                },
                 None => {
                     match tmp.1 {
                         Some(e) => break,
