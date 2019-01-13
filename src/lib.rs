@@ -1,13 +1,9 @@
-extern crate crossbeam_channel;
-extern crate intmap;
-
 use crossbeam_channel::{RecvError, RecvTimeoutError, Receiver, TryRecvError};
 use intmap::IntMap;
+use log::{info, trace};
 use std::ops::{Index, IndexMut, RangeTo, RangeFrom, RangeFull, RangeInclusive};
 use std::result::Result;
 use std::time::{Duration, Instant};
-
-static BENCH: bool = true;
 
 pub struct OffsetVec {
     data: Vec<u8>,
@@ -141,7 +137,7 @@ pub struct OrderedStream {
 }
 
 impl OrderedStream {
-    pub fn with_capacity_and_recvr(cap: usize, rx: Receiver<(u64, Vec<u8>)>)
+    pub fn with_capacity_recvr(cap: usize, rx: Receiver<(u64, Vec<u8>)>)
         -> OrderedStream
     {
         OrderedStream {
@@ -154,7 +150,7 @@ impl OrderedStream {
     pub fn with_recvr(rx: Receiver<(u64, Vec<u8>)>)
         -> OrderedStream
     {
-        OrderedStream::with_capacity_and_recvr(16, rx)
+        OrderedStream::with_capacity_recvr(16, rx)
     }
 
     pub fn set_recv(&mut self, rx: Receiver<(u64, Vec<u8>)>)
@@ -205,13 +201,15 @@ impl OrderedStream {
     }
 
     pub fn read_to_pos(&mut self, p: u64)
-        -> Result<bool, RecvError>
+        -> Result<bool, RecvError>//
     {
         if p < self.pos()
         { return Ok(false); }
 
         if self.chk_lookup(p)
         { return Ok(false); }
+
+        trace!("ordered_stream: read_to_pos, {}", p);
 
         loop {
             match self
@@ -241,6 +239,8 @@ impl OrderedStream {
         if p < self.pos() { return Ok(false); }
         if self.chk_lookup(p) { return Ok(false); }
 
+        trace!("ordered_stream: read_to_pos_timeout, {}, {:#?}", p, d);
+
         loop {
             match self
                  .incoming
@@ -266,6 +266,7 @@ impl OrderedStream {
     pub fn read_msgs(&mut self, cnt: usize)
         -> (usize, Option<RecvError>)
     {
+        trace!("ordered_stream: read_msgs {}", cnt);
         let mut a = 0;
         let mut o = None;
 
@@ -291,6 +292,7 @@ impl OrderedStream {
     pub fn read_len(&mut self, len: usize)
         -> (usize, Option<RecvError>)
     {
+        trace!("ordered_stream: read_len {}", len);
         let mut total = 0;
 
         while total < len {
@@ -318,8 +320,9 @@ impl OrderedStream {
     }
 
     pub fn squeeze(&mut self, len: usize)
-        -> (Option<Vec<u8>>, Option<RecvError>)
+        -> Result<Vec<u8>, Option<RecvError>>
     {
+        trace!("ordered_stream: squeeze {}", len);
         let timer = Instant::now();
 
         let mut buf: Vec<u8>
@@ -340,29 +343,23 @@ impl OrderedStream {
                 if data.len() == remainder {
                     unsafe { (*ptr).increment() };
                     if data.offset() == 0 {
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        unsafe { return (Some((*ptr).rm_item(tempcur).unwrap().into_inner()), None) };
+                        info!("{:#?}", timer.elapsed());
+                        unsafe { return Ok((*ptr).rm_item(tempcur).unwrap().into_inner()) };
                     }
                     buf.extend_from_slice(&data[..]);
                     unsafe { (*ptr).rm_item(tempcur) };
-                    if BENCH {
-                        println!("{:#?}", timer.elapsed());
-                    }
-                    return (Some(buf), None);
+                    info!("{:#?}", timer.elapsed());
+                    return Ok(buf);
                 }
                 else if data.len() > remainder {
                     buf.extend_from_slice(&data[..(remainder + data.offset())]);
 
-                    if BENCH {
-                        println!("{:#?}", timer.elapsed());
-                    }
+                    info!("{:#?}", timer.elapsed());
 
                     data.inc_offset(remainder)
                         .expect("error setting offset");
 
-                    return (Some(buf), None);
+                    return Ok(buf);
                 }
                 remainder -= data.len();
                 buf.extend_from_slice(&data[..]);
@@ -377,7 +374,7 @@ impl OrderedStream {
                 match e {
                     Ok(_) => (),
                     Err(err) => {
-                        return (None, Some(err));
+                        return Err(Some(err));
                     },
                 }
             },
@@ -392,30 +389,17 @@ impl OrderedStream {
                         unsafe { (*ptr).increment() };
                         buf.extend_from_slice(&data[..]);
                         unsafe { (*ptr).rm_item(tempcur) };
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (Some(buf), None);
+                        info!("{:#?}", timer.elapsed());
+                        return Ok(buf);
                     }
                     else if data.len() > remainder {
-                        /*let reinsert: Vec<u8> = data.drain(remainder..).collect();
-
-                        buf.append(&mut data);
-                        self.add_item_sep(tempcur, reinsert);
-
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (Some(buf), None);*/
                         buf.extend_from_slice(&data[..(data.offset() + remainder)]);
                         data.inc_offset(remainder)
                             .expect("error setting offset");
 
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
+                        info!("{:#?}", timer.elapsed());
 
-                        return (Some(buf), None);
+                        return Ok(buf);
                     }
                     remainder -= data.len();
                     buf.extend_from_slice(&data[..]);
@@ -431,15 +415,11 @@ impl OrderedStream {
                         Ok(_) => (),
                         Err(err) => {
                             if buf.len() == 0 {
-                                if BENCH {
-                                    println!("{:#?}", timer.elapsed());
-                                }
-                                return (None, Some(err));
+                                info!("{:#?}", timer.elapsed());
+                                return Err(Some(err));
                             }
-                            if BENCH {
-                                println!("{:#?}", timer.elapsed());
-                            }
-                            return (Some(buf), Some(err));
+                            info!("{:#?}", timer.elapsed());
+                            return Ok(buf);
                         }
                     }
                 },
@@ -448,8 +428,9 @@ impl OrderedStream {
     }
 
     pub fn squeeze_timeout(&mut self, len: usize, d: Duration)
-        -> (Option<Vec<u8>>, Option<RecvTimeoutError>)
+        -> Result<Vec<u8>, Option<RecvTimeoutError>>
     {
+        trace!("ordered_stream: squeeze_timeout {}, {:#?}", len, d);
         let timer = Instant::now();
 
         let mut buf: Vec<u8>
@@ -470,29 +451,23 @@ impl OrderedStream {
                 if data.len() == remainder {
                     unsafe { (*ptr).increment() };
                     if data.offset() == 0 {
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        unsafe { return (Some((*ptr).rm_item(tempcur).unwrap().into_inner()), None) };
+                        info!("{:#?}", timer.elapsed());
+                        unsafe { return Ok((*ptr).rm_item(tempcur).unwrap().into_inner()); };
                     }
                     buf.extend_from_slice(&data[..]);
                     unsafe { (*ptr).rm_item(tempcur) };
-                    if BENCH {
-                        println!("{:#?}", timer.elapsed());
-                    }
-                    return (Some(buf), None);
+                    info!("{:#?}", timer.elapsed());
+                    return Ok(buf);
                 }
                 else if data.len() > remainder {
                     buf.extend_from_slice(&data[..(remainder + data.offset())]);
 
-                    if BENCH {
-                        println!("{:#?}", timer.elapsed());
-                    }
+                    info!("{:#?}", timer.elapsed());
 
                     data.inc_offset(remainder)
                         .expect("error setting offset");
 
-                    return (Some(buf), None);
+                    return Ok(buf);
                 }
                 remainder -= data.len();
                 buf.extend_from_slice(&data[..]);
@@ -507,10 +482,8 @@ impl OrderedStream {
                 match e {
                     Ok(_) => (),
                     Err(err) => {
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (None, Some(err));
+                        info!("{:#?}", timer.elapsed());
+                        return Err(Some(err));
                     },
                 }
             },
@@ -525,10 +498,8 @@ impl OrderedStream {
                         unsafe { (*ptr).increment() };
                         buf.extend_from_slice(&data[..]);
                         unsafe { (*ptr).rm_item(tempcur) };
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (Some(buf), None);
+                        info!("{:#?}", timer.elapsed());
+                        return Ok(buf);
                     }
                     else if data.len() > remainder {
                         /*let reinsert: Vec<u8> = data.drain(remainder..).collect();
@@ -544,11 +515,9 @@ impl OrderedStream {
                         data.inc_offset(remainder)
                             .expect("error setting offset");
 
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
+                        info!("{:#?}", timer.elapsed());
 
-                        return (Some(buf), None);
+                        return Ok(buf);
                     }
                     remainder -= data.len();
                     buf.extend_from_slice(&data[..]);
@@ -564,15 +533,11 @@ impl OrderedStream {
                         Ok(_) => (),
                         Err(err) => {
                             if buf.len() == 0 {
-                                if BENCH {
-                                    println!("{:#?}", timer.elapsed());
-                                }
-                                return (None, Some(err));
+                                info!("{:#?}", timer.elapsed());
+                                return Err(Some(err));
                             }
-                            if BENCH {
-                                println!("{:#?}", timer.elapsed());
-                            }
-                            return (Some(buf), Some(err));
+                            info!("{:#?}", timer.elapsed());
+                            return Ok(buf);
                         }
                     }
                 },
@@ -581,8 +546,9 @@ impl OrderedStream {
     }
 
     pub fn current(&mut self)
-        -> (Option<Vec<u8>>, Option<RecvError>)
+        -> Result<Vec<u8>, Option<RecvError>>
     {
+        trace!("ordered_stream: current");
         let timer = Instant::now();
         let i = self.pos();
 
@@ -591,31 +557,23 @@ impl OrderedStream {
         {
             Some(item) => {
                 self.increment();
-                if BENCH {
-                    println!("{:#?}", timer.elapsed());
-                }
-                return (Some(item.into_inner()), None);
+                info!("{:#?}", timer.elapsed());
+                return Ok(item.into_inner());
             },
             None => {
                 match self.read_to_seq_pos() {
                     Ok(b) => {
                         if b {
                             self.increment();
-                            if BENCH {
-                                println!("{:#?}", timer.elapsed());
-                            }
-                            return (Some(self.rm_item(i).unwrap().into_inner()), None);
+                            info!("{:#?}", timer.elapsed());
+                            return Ok(self.rm_item(i).unwrap().into_inner());
                         }
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (None, None);
+                        info!("{:#?}", timer.elapsed());
+                        return Err(None);
                     },
                     Err(e) => {
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (None, Some(e));
+                        info!("{:#?}", timer.elapsed());
+                        return Err(Some(e));
                     },
                 }
             }
@@ -623,8 +581,9 @@ impl OrderedStream {
     }
 
     pub fn current_timeout(&mut self, d: Duration)
-        -> (Option<Vec<u8>>, Option<RecvTimeoutError>)
+        -> Result<Vec<u8>, Option<RecvTimeoutError>>
     {
+        trace!("ordered_stream: current_timeout {:#?}", d);
         let timer = Instant::now();
         let i = self.pos();
 
@@ -633,10 +592,8 @@ impl OrderedStream {
         {
             Some(item) => {
                 self.increment();
-                if BENCH {
-                    println!("{:#?}", timer.elapsed());
-                }
-                return (Some(item.into_inner()), None);
+                info!("{:#?}", timer.elapsed());
+                return Ok(item.into_inner());
             },
             None => {
                 match self
@@ -645,22 +602,16 @@ impl OrderedStream {
                     Ok(b) => {
                         if b == true {
                             self.increment();
-                            if BENCH {
-                                println!("{:#?}", timer.elapsed());
-                            }
+                            info!("{:#?}", timer.elapsed());
 
-                            return (Some(self.rm_item(i).unwrap().into_inner()), None);
+                            return Ok(self.rm_item(i).unwrap().into_inner());
                         }
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (None, None);
+                        info!("{:#?}", timer.elapsed());
+                        return Err(None);
                     },
                     Err(e) => {
-                        if BENCH {
-                            println!("{:#?}", timer.elapsed());
-                        }
-                        return (None, Some(e));
+                        info!("{:#?}", timer.elapsed());
+                        return Err(Some(e));
                     },
                 }
             }
@@ -670,6 +621,7 @@ impl OrderedStream {
     pub fn sop(&mut self)
         -> Result<usize, TryRecvError>
     {
+        trace!("ordered_stream: sop");
         let mut cnt = 0;
         loop {
             match self
@@ -693,6 +645,7 @@ impl OrderedStream {
     pub fn read_until_timeout(&mut self, d: Duration)
         -> Result<usize, RecvTimeoutError>
     {
+        trace!("ordered_stream: read_until_timeout {:#?}", d);
         let mut cnt = 0;
         loop {
             match self
@@ -716,6 +669,7 @@ impl OrderedStream {
     pub fn read_for_duration(&mut self, d: Duration)
         -> Result<usize, TryRecvError>
     {
+        trace!("ordered_stream: read_for_duration {:#?}", d);
         let timer = Instant::now();
 
         let mut cnt = 0;
@@ -745,14 +699,162 @@ impl OrderedStream {
             }
         }
     }
+
+    pub fn mut_chunks(&mut self, sz: usize)
+        -> OrderedChunks
+    {
+        OrderedChunks {
+            os: self,
+            chunk_size: sz,
+        }
+    }
+
+    pub fn mut_chunks_timeout(&mut self, sz: usize, t: Duration)
+        -> OrderedChunksTimeout
+    {
+        OrderedChunksTimeout {
+            os: self,
+            chunk_size: sz,
+            timeout: t,
+        }
+    }
+
+    pub fn iter_mut(&mut self)
+        -> OrderedIter
+    {
+        OrderedIter {
+            os: self,
+        }
+    }
+
+    pub fn iter_mut_timeout(&mut self, t: Duration)
+        -> OrderedIterTimeout
+    {
+        OrderedIterTimeout {
+            os: self,
+            timeout: t,
+        }
+    }
+
+    pub fn enumerate(&mut self)
+        -> OrderedIterEnumerated
+    {
+        OrderedIterEnumerated {
+            os: self,
+        }
+    }
+
+    pub fn enumerate_timeout(&mut self, t: Duration)
+        -> OrderedIterTimeoutEnumerated
+    {
+        OrderedIterTimeoutEnumerated {
+            os: self,
+            timeout: t,
+        }
+    }
+}
+
+pub struct OrderedChunks<'a> {
+    os: &'a mut OrderedStream,
+    chunk_size: usize,
+}
+
+impl<'a> Iterator for OrderedChunks<'a> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        match self.os.squeeze(self.chunk_size) {
+            Ok(msg) => return Some(msg),
+            Err(_)  => return None,
+        }
+    }
+}
+
+pub struct OrderedChunksTimeout<'a> {
+    os: &'a mut OrderedStream,
+    chunk_size: usize,
+    timeout: Duration,
+}
+
+impl<'a> Iterator for OrderedChunksTimeout<'a> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        match self.os.squeeze_timeout(self.chunk_size, self.timeout) {
+            Ok(msg) => return Some(msg),
+            Err(_)  => return None,
+        }
+    }
+}
+
+pub struct OrderedIter<'a> {
+    os: &'a mut OrderedStream,
+}
+
+impl<'a> Iterator for OrderedIter<'a> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        match self.os.current() {
+            Ok(msg) => return Some(msg),
+            Err(_)  => return None,
+        }
+    }
+}
+
+pub struct OrderedIterTimeout<'a> {
+    os: &'a mut OrderedStream,
+    timeout: Duration,
+}
+
+impl<'a> Iterator for OrderedIterTimeout<'a> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        match self.os.current_timeout(self.timeout) {
+            Ok(msg) => return Some(msg),
+            Err(_)  => return None,
+        }
+    }
+}
+
+pub struct OrderedIterEnumerated<'a> {
+    os: &'a mut OrderedStream,
+}
+
+impl<'a> Iterator for OrderedIterEnumerated<'a> {
+    type Item = (u64, Vec<u8>);
+
+    fn next(&mut self) -> Option<(u64, Vec<u8>)> {
+        let i = self.os.pos();
+        match self.os.current() {
+            Ok(msg) => return Some((i, msg)),
+            Err(_)  => return None,
+        }
+    }
+}
+
+pub struct OrderedIterTimeoutEnumerated<'a> {
+    os: &'a mut OrderedStream,
+    timeout: Duration,
+}
+
+impl<'a> Iterator for OrderedIterTimeoutEnumerated<'a> {
+    type Item = (u64, Vec<u8>);
+
+    fn next(&mut self) -> Option<(u64, Vec<u8>)> {
+        let i = self.os.pos();
+        match self.os.current_timeout(self.timeout) {
+            Ok(msg) => return Some((i, msg)),
+            Err(_)  => return None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crossbeam_channel::unbounded;
-    use std::io::{self, Read};
     use std::str;
-    use std::thread;
     use super::*;
 
     #[test]
@@ -762,56 +864,58 @@ mod tests {
         smmsg_lgblock();
         msg_iter();
         abc_blocks();
+        iteration();
+        chunking();
+        enumeriterate();
     }
 
     fn abc() {
-        println!("alphabet test");
+        println!("\n\nalphabet test");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(64, rx);
+        let mut os = OrderedStream::with_capacity_recvr(64, rx);
 
         let mut seq = 25;
         for num in 0..26 {
             match tx.send((seq as u64, vec![(num + 97), (num + 97)])) {
                 Ok(_) => (),
-                Err(e) => println!("err {:?}", num),
+                Err(_) => println!("err {:?}", num),
             }
             seq -= 1;
         }
 
-        let mut iter  = 0;
         let mut last  = 0u8;
         let mut check = false;
 
         loop {
+            let timer = Instant::now();
             let tmp = os.squeeze_timeout(1, Duration::from_millis(1));
-            match tmp.0 {
-                Some(x) => {
-                    println!("iter: {}, data: {}", iter, str::from_utf8(&x).expect("utf error"));
+            println!("squeezed 1 byte in {:#?} (1 ms timeout)", timer.elapsed());
+            match tmp {
+                Ok(x) => {
+                    assert_eq!(x.len(), 1);
                     if check {
-                        println!("asserting {} == {}", last, x[0]);
                         assert_eq!(last, x[0]);
                     }
                     last = x[0];
                     check = !check;
                 },
-                None => {
-                    match tmp.1 {
-                        Some(e) => {
-                            println!("{:?}", e);
+                Err(e) => {
+                    match e {
+                        Some(error) => {
+                            println!("{:?}", error);
                             break;
                         },
                         None => continue,
                     }
                 },
             }
-            iter += 1;
         }
     }
 
     fn abc_blocks() {
-        println!("alphablock test");
+        println!("\n\nalphablock test");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(64, rx);
+        let mut os = OrderedStream::with_capacity_recvr(64, rx);
 
         let test = b"abcdefghijklmnopqrstuvwxyz";
         let should_one = b"abcdefghijklmnopqrstuvwxyzabcdefghijklm";
@@ -824,25 +928,27 @@ mod tests {
         for num in 0..3 {
             match tx.send((num, msg.clone())) {
                 Ok(_) => (),
-                Err(e) => println!("err {:?}", num),
+                Err(_) => println!("err {:?}", num),
             }
         }
         let mut one = Vec::with_capacity(39);
         let mut two = Vec::with_capacity(39);
         let mut cnt = 0;
         loop {
+            let timer = Instant::now();
             let tmp = os.squeeze_timeout(39, Duration::from_millis(1));
-            match tmp.0 {
-                Some(x) => {
-                    println!("iter: {}, data: {} (len: {})", cnt, str::from_utf8(&x).expect("utf error"), x.len());
+            println!("squeezed 39 bytes in {:#?} (1 ms timeout)", timer.elapsed());
+            match tmp {
+                Ok(x) => {
+                    assert_eq!(x.len(), 39);
                     if cnt == 0 {
                         one.extend_from_slice(&x);
                     } else if cnt == 1 {
                         two.extend_from_slice(&x);
                     }
                 },
-                None => {
-                    match tmp.1 {
+                Err(error) => {
+                    match error {
                         Some(e) => {
                             println!("{:?}", e);
                             break;
@@ -858,9 +964,9 @@ mod tests {
     }
 
     fn lgmsg_smblock() {
-        println!("sending large messages and squeezing small blocks");
+        println!("\n\nsending large messages and squeezing small blocks");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(4, rx);
+        let mut os = OrderedStream::with_capacity_recvr(4, rx);
 
         let msg = vec![97u8; 32*1024*1024];
 
@@ -872,34 +978,28 @@ mod tests {
             //println!("sending {} bytes for the {} time", msg.len(), i);
         }
 
-        let mut iter = 0;
-
         loop {
-            println!("lookup len: {}", os.lookup.len());
+            let timer = Instant::now();
             let tmp = os.squeeze_timeout(7*1024*1024, Duration::from_millis(4));
-            match tmp.0 {
-                Some(x) => {
-                    let end = match x.len() >= 16 {
-                        true => 16,
-                        false => x.len(),
-                    };
-                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
+            match tmp {
+                Ok(x) => {
+                    assert!(x.len() <= 7*1024*1024);
+                    println!("squeezed {} mib in {:#?} (4 ms timeout)", (x.len() / 1024)/1024, timer.elapsed());
                 },
-                None => {
-                    match tmp.1 {
-                        Some(e) => break,
+                Err(error) => {
+                    match error {
+                        Some(_) => break,
                         None => continue,
                     }
                 },
             }
-            iter += 1;
         }
     }
 
     fn smmsg_lgblock() {
-        println!("sending small messages and squeezing large blocks");
+        println!("\n\nsending small messages and squeezing large blocks");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(64*1024, rx);
+        let mut os = OrderedStream::with_capacity_recvr(64*1024, rx);
 
         let msg = vec![97u8; 1350];
 
@@ -911,34 +1011,28 @@ mod tests {
             //println!("sending {} bytes for the {} time", msg.len(), i);
         }
 
-        let mut iter = 0;
-
         loop {
-            println!("lookup len: {}", os.lookup.len());
+            let timer = Instant::now();
             let tmp = os.squeeze_timeout(32*1024*1024, Duration::from_millis(4));
-            match tmp.0 {
-                Some(x) => {
-                    let end = match x.len() >= 16 {
-                        true => 16,
-                        false => x.len(),
-                    };
-                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
+            match tmp {
+                Ok(x) => {
+                    assert!(x.len() <= 32*1024*1024);
+                    println!("squeezed {} mib in {:#?} (4 ms timeout)", (x.len() / 1024)/1024, timer.elapsed());
                 },
-                None => {
-                    match tmp.1 {
-                        Some(e) => break,
+                Err(error) => {
+                    match error{
+                        Some(_) => break,
                         None => continue,
                     }
                 },
             }
-            iter += 1;
         }
     }
 
     fn msg_iter() {
-        println!("going through messages in order");
+        println!("\n\ngoing through messages in order");
         let (tx, rx) = unbounded();
-        let mut os = OrderedStream::with_capacity_and_recvr(16, rx);
+        let mut os = OrderedStream::with_capacity_recvr(16, rx);
 
         let msg = vec![97u8; 1350];
 
@@ -950,27 +1044,84 @@ mod tests {
             //println!("sending {} bytes for the {} time", msg.len(), i);
         }
 
-        let mut iter = 0;
-
         loop {
-            println!("lookup len: {}", os.lookup.len());
-            let tmp = os.current_timeout(Duration::from_millis(1));
-            match tmp.0 {
-                Some(x) => {
-                    let end = match x.len() >= 16 {
-                        true => 16,
-                        false => x.len(),
-                    };
-                    println!("iter: {}, len: {}\ndata: {}", iter, x.len(), str::from_utf8(&x[0..end]).expect("utf error"));
-                },
-                None => {
-                    match tmp.1 {
-                        Some(e) => break,
+            let timer = Instant::now();
+            let tmp = os.current_timeout(Duration::from_micros(3));
+            println!("got message in {:#?} (3 µs timeout)", timer.elapsed());
+            match tmp {
+                Ok(x) => assert_eq!(x.len(), 1350),
+                Err(e) => {
+                    match e {
+                        Some(_) => break,
                         None => continue,
                     }
                 },
             }
-            iter += 1;
         }
+    }
+
+    fn iteration() {
+        println!("\n\niterating through messages in order");
+        let (tx, rx) = unbounded();
+        let mut os = OrderedStream::with_capacity_recvr(16, rx);
+
+        let msg = vec![97u8; 1350];
+
+        for i in 0u64..16 {
+            match tx.send((i, msg.clone())) {
+                Ok(_) => (),
+                Err(e) => println!("{:?}", e),
+            }
+            //println!("sending {} bytes for the {} time", msg.len(), i);
+        }
+        drop(tx);
+
+        // this will enumerate items for this call only, not taking into account timeout interruptions
+        os.iter_mut().enumerate().for_each(|msg| {
+            assert_eq!(msg.1.len(), 1350);
+            println!("{}, {}", msg.0, str::from_utf8(&msg.1[..2]).unwrap_or("no"));
+        });
+    }
+
+    fn enumeriterate() {
+        println!("\n\nenumerating messages in order");
+        let (tx, rx) = unbounded();
+        let mut os = OrderedStream::with_capacity_recvr(16, rx);
+
+        let msg = vec![97u8; 1350];
+
+        for i in 0u64..16 {
+            match tx.send((i, msg.clone())) {
+                Ok(_) => (),
+                Err(e) => println!("{:?}", e),
+            }
+        }
+        drop(tx);
+
+        // this will return tuples containing the message index relative to the overall stream
+        os.enumerate().for_each(|msg| {
+            assert_eq!(msg.1.len(), 1350);
+            println!("{}, {}", msg.0, str::from_utf8(&msg.1[..2]).unwrap_or("no"));
+        });
+    }
+
+    fn chunking() {
+        println!("\n\nchunking messages in order");
+        let (tx, rx) = unbounded();
+        let mut os = OrderedStream::with_capacity_recvr(16, rx);
+
+        let msg = vec![97u8; 1350];
+
+        for i in 0u64..16 {
+            match tx.send((i, msg.clone())) {
+                Ok(_) => (),
+                Err(e) => println!("{:?}", e),
+            }
+        }
+        drop(tx);
+        os.mut_chunks(1024).enumerate().for_each(|msg| {
+            assert!(msg.1.len() <= 1024);
+            println!("{}, {}", msg.0, str::from_utf8(&msg.1[..2]).unwrap_or("no"));
+        });
     }
 }

@@ -2,7 +2,9 @@
 name = "ordered_stream"
 version = "0.1.0"
 authors = ["maya"]
+edition = "2018"
 
 [dependencies]
 crossbeam-channel = "0.3.6"
 intmap = "0.4.0"
+log = "0.4.6"
