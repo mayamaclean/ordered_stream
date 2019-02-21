@@ -1,11 +1,22 @@
-use std::ops::{Index, IndexMut, RangeTo, RangeFrom, RangeFull, RangeInclusive};
+use std::ops::{Index, IndexMut, RangeTo, RangeFrom, RangeFull, Range};
 
 pub struct OffsetVec<T> {
     data: Vec<T>,
     offset: usize,
 }
 
-impl<T> OffsetVec<T> {
+impl<T: Clone> Default for OffsetVec<T> {
+    fn default()
+        -> OffsetVec<T>
+    {
+        OffsetVec {
+            data: Vec::new(),
+            offset: 0,
+        }
+    }
+}
+
+impl<T: Clone> OffsetVec<T> {
     pub fn from_pieces(d: Vec<T>, o: usize)
         -> OffsetVec<T>
     {
@@ -38,7 +49,7 @@ impl<T> OffsetVec<T> {
     pub fn new()
         -> OffsetVec<T>
     {
-        OffsetVec::with_capacity(16)
+        Default::default()
     }
 
     pub fn len(&self)
@@ -61,7 +72,7 @@ impl<T> OffsetVec<T> {
             return Err(());
         }
         self.offset = new_offset;
-        return Ok(());
+        Ok(())
     }
 
     pub fn into_inner(self)
@@ -69,6 +80,13 @@ impl<T> OffsetVec<T> {
     {
         self.data
     }
+
+    pub fn is_empty(&self)
+        -> bool
+    {
+        self.data.is_empty()
+    }
+
 }
 
 impl<T> Index<RangeFrom<usize>> for OffsetVec<T> {
@@ -98,12 +116,12 @@ impl<T> Index<RangeFull> for OffsetVec<T> {
     }
 }
 
-impl<T> Index<RangeInclusive<usize>> for OffsetVec<T> {
+impl<T> Index<Range<usize>> for OffsetVec<T> {
     type Output = [T];
 
     #[inline]
-    fn index(&self, idx: RangeInclusive<usize>) -> &[T] {
-        &self.data[(self.offset + idx.start())..*idx.end()]
+    fn index(&self, idx: Range<usize>) -> &[T] {
+        &self.data[(self.offset + idx.start)..idx.end]
     }
 }
 
@@ -123,15 +141,15 @@ impl<T> IndexMut<RangeTo<usize>> for OffsetVec<T> {
 
 impl<T> IndexMut<RangeFull> for OffsetVec<T> {
     #[inline]
-    fn index_mut<'a>(&'a mut self, _: RangeFull) -> &'a mut [T] {
+    fn index_mut(&mut self, _: RangeFull) -> &mut [T] {
         self.data.index_mut(self.offset..)
     }
 }
 
-impl<T> IndexMut<RangeInclusive<usize>> for OffsetVec<T> {
+impl<T> IndexMut<Range<usize>> for OffsetVec<T> {
     #[inline]
-    fn index_mut<'a>(&'a mut self, idx: RangeInclusive<usize>) -> &'a mut [T] {
-        self.data.index_mut((self.offset + idx.start())..*idx.end())
+    fn index_mut<'a>(&'a mut self, idx: Range<usize>) -> &'a mut [T] {
+        self.data.index_mut((self.offset + idx.start)..idx.end)
     }
 }
 
