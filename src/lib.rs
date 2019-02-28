@@ -39,5 +39,4 @@
 pub use crate::ordered_stream::OrderedStream as OrderedStream;
 
 pub mod ordered_stream;
-pub mod multi_vec;
 pub mod offset_vec;
