@@ -1,5 +1,6 @@
 use crate::offset_vec::OffsetVec;
 use crossbeam_channel::{RecvError, RecvTimeoutError, Receiver, TryRecvError};
+use flamer::flame;
 use intmap::IntMap;
 use log::{info, trace};
 use std::io::{self, ErrorKind, Read};
@@ -31,6 +32,7 @@ impl<T: Clone> OrderedStream<T> {
         OrderedStream::with_capacity_recvr(16, rx)
     }
 
+    #[flame]
     pub fn size(&self) -> usize {
         let mut size = 0;
         let mut idx = 0;
@@ -50,6 +52,10 @@ impl<T: Clone> OrderedStream<T> {
         self.len() == 0
     }
 
+    pub fn queue_len(&self) -> usize {
+        self.incoming.len()
+    }
+
     /// Sets stream receiver to `rx`
     pub fn set_recv(&mut self, rx: Receiver<(u64, Vec<T>)>)
     {
@@ -57,6 +63,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Adds an item to the cache as a sequence/item pair
+    #[flame]
     pub fn add_item_sep(&mut self, seq: u64, item: Vec<T>)
         -> bool
     {
@@ -71,6 +78,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Insert a `Vec<T>` starting at `offset`
+    #[flame]
     pub fn add_item_sep_offset(&mut self, seq: u64, item: Vec<T>, offset: usize)
         -> bool
     {
@@ -78,6 +86,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Insert tupled item with an offset
+    #[flame]
     pub fn add_item_offset(&mut self, msg: (u64, Vec<T>), offset: usize)
         -> bool
     {
@@ -85,6 +94,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Check cache for sequence number
+    #[flame]
     pub fn chk_lookup(&mut self, seq: u64)
         -> bool
     {
@@ -106,6 +116,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Read to sequence number `p`
+    #[flame]
     pub fn read_to_pos(&mut self, p: u64)
         -> Result<bool, RecvError>//
     {
@@ -264,9 +275,11 @@ impl<T: Clone> OrderedStream<T> {
     /// Squeeze `len * <T>size_of()` bytes from the stream, only returning when a `len` elements are
     /// cloned into the buffer or the channel is closed. Times are logged for flexibility with
     /// _timeout functions
+    #[flame]
     pub fn squeeze(&mut self, len: usize)
         -> Result<Vec<T>, Option<RecvError>>
     {
+        flame::note("ordered_stream", None);
         if self.is_empty() && self.incoming.is_empty() {
             return Err(None)
         }
@@ -513,6 +526,7 @@ impl<T: Clone> OrderedStream<T> {
     }
 
     /// Returns the next message from the stream according to sequence
+    #[flame]
     pub fn current(&mut self)
         -> Result<Vec<T>, Option<RecvError>>
     {
@@ -827,7 +841,9 @@ impl<'a, T: Clone> Iterator for OrderedIterTimeoutEnumerated<'a, T> {
 }
 
 impl Read for OrderedStream<u8> {
+    #[flame]
     fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> {
+        flame::note("ordered_stream", None);
         if self.is_empty() && self.incoming.is_empty() {
             return Err(io::Error::new(ErrorKind::UnexpectedEof, "empty stream!"))
         }
